@@ -1,5 +1,8 @@
 baseurl: /cybertale.github.io
 url: https://cybertale.github.io
 
-theme: jekyll-theme-hacker
+title: 知识杂货铺
+description: 不卖切糕
+github.repository_url: www.github.com/cybertale
 
+theme: jekyll-theme-hacker

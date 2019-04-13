@@ -1,2 +1,5 @@
 baseurl: /cybertale.github.io
 url: https://cybertale.github.io
+
+theme: jekyll-theme-hacker
+

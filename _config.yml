@@ -5,6 +5,7 @@ lang: zh_CN
 title: 知识杂货铺
 description: 不卖切糕
 author: 宋强
+repository: cybertale/cybertale.github.io
 github.repository_url: www.github.com/cybertale
 
 social:

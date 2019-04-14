@@ -1,8 +1,18 @@
 baseurl: /cybertale.github.io
 url: https://cybertale.github.io
+lang: zh_CN
 
 title: 知识杂货铺
 description: 不卖切糕
+author: 宋强
 github.repository_url: www.github.com/cybertale
 
+social:
+  name: 宋强
+  links:
+    - https://github.com/cybertale
+
 theme: jekyll-theme-hacker
+
+plugins:
+  - jekyll-seo-tag

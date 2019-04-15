@@ -1,5 +1,7 @@
 baseurl: /cybertale.github.io
-url: https://cybertale.github.io
+# url: https://cybertale.github.io
+# url: /home/duke/cybertale.github.io/_site
+url: iesfc.top
 lang: zh_CN
 
 title: 知识杂货铺
@@ -18,3 +20,4 @@ theme: jekyll-theme-hacker
 plugins:
   - jekyll-seo-tag
   - jekyll-github-metadata
+  - jekyll-sitemap

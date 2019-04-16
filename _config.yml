@@ -16,9 +16,12 @@ social:
     - https://github.com/cybertale
 
 theme: jekyll-theme-hacker
+paginate: 20
+paginate_path: "page=:num"
 
 plugins:
   - jekyll-seo-tag
   - jekyll-github-metadata
   - jekyll-sitemap
+  - jekyll-paginator
   - jemoji

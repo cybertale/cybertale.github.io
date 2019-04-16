@@ -3,6 +3,7 @@ layout: post
 title: Linux内核中的to_container_of
 author: 宋强
 tags: Linux内核
+date: 2018-06-24 21:07 +0800
 ---
 
 Linux的内核中使用了非常多的面向对象编程的思想，数据结构相对来说还是比较容易理解的，就拿时钟驱动来说，Linux提供的对某一个时钟的抽象是clk结构体，这个算作基类，但是对于时钟我们可能添加自己的属性，所以规定我们可以定义一个形如clk_foo的结构体：

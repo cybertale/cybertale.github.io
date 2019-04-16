@@ -3,6 +3,7 @@ layout: post
 title: 在Windows Server 2012上的IIS8.5中配置伪静态
 author: 宋强
 tags: IIS Web
+date: 2017-03-08 21:47 +0800
 ---
 
 这个网站本身是一个asp.net网站，参数都是url传参，但是由于一些原因百度蜘蛛不会收录小网站的带有问好参数的网页，所以如果能够对网页url进行伪静态重写的话就可以让百度放心的收录我们的网页。

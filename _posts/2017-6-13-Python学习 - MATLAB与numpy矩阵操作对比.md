@@ -3,6 +3,7 @@ layout: post
 title: Python学习 - MATLAB与numpy矩阵操作对比
 author: 宋强
 tags: Python numpy
+date: 2017-06-13 10:03 +0800
 ---
 
 # 创建矩阵

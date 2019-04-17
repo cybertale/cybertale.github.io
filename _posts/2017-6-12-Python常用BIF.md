@@ -3,6 +3,7 @@ layout: post
 title: Python常用BIF
 author: 宋强
 tags: Python
+date: 2017-06-12 23:30 +0800
 ---
 
 都说“人生苦短，我用Python”，这句话在我用ROS必须在C++和Python中选择一个的时候深有体会，前段时间在做ROS图传小车，所以又加深了对Python的学习，在这个文章里总结一下常用的BIF函数。

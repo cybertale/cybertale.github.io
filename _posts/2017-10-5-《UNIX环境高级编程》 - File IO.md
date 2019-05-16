@@ -198,6 +198,8 @@ fcntl的功能由cmd的值决定（定义于<fcntl.h>）：
 int ioctl(int filedes, int request, ...);
 ```
 
+ioctl是一个各种剩余函数的杂物箱，扩展设备驱动的时候会需要。
+
 # /dev/fd目录
 
 这个目录下一般都有0、1、2三个文件夹，打开这些文件夹相当于使用dup复制描述符表。

@@ -14,7 +14,7 @@ int open(const char *pathname, int oflag, ...);
 ```
 
 ## oflag
-下面这些参数都定义在<fcntl.h>头文件中。
+下面这些参数都定义在\<fcntl.h\>头文件中。
 
 下面三个参数有且只有一个：
 
@@ -77,7 +77,7 @@ off_t lseek(int fileds, off_t offset, int whence);
 
 成功返回当前偏移量，失败返回-1。
 
-offset的含义取决于whence（定义在<unistd.h>）：
+offset的含义取决于whence（定义在\<unistd.h\>）：
 
 | whence |     |
 |----------|----------------------------------------|
@@ -181,7 +181,7 @@ int fdatasync(int filedes);
 int fcntl(int filedes, int cmd, .../* int arg */);
 ```
 
-fcntl的功能由cmd的值决定（定义于<fcntl.h>）：
+fcntl的功能由cmd的值决定（定义于\<fcntl.h\>）：
 
 | cmd                    |    |
 |----------------------------|-------------------------|

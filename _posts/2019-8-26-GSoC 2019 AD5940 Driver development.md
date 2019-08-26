@@ -23,6 +23,7 @@ date: 2019-08-26 15:19 +0800
 # Future work
 
 * Add trigger, buffer and triggered buffer support of the driver.
+* Send it to the mainline kernel as patches.
 * Add DAC support of the device.
 * Add all filter results read entrances for all channels.
 * Power management of the system.

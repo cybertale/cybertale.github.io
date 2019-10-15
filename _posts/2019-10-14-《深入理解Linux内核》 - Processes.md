@@ -124,8 +124,109 @@ union thread_union {
 
 多CPU操作系统中，将process descriptor和内核栈绑定非常方便，每个CPU只需要通过访问本地的数据结构就能得到process descriptor。旧版系统中由于current是一个全局静态变量，多CPU下就需要使用current数组来表示每个CPU的process descriptor指针。（这种优化是一种面向对象的类的概念上的优化）
 
-## Doubly linked lists 内核使用的双向链表
+### Doubly linked lists 内核使用的双向链表
 
 核心的一个结构体是一个具有前后指针的结构体，使用了面向对象继承的思想来实现对这个结构体的扩展，
 
 [图]
+
+Linux中使用的双向链表的头指针是一个指向了只具有前后指针的dummy头，类型是`list_head`，其他的被包含的节点的类型是`list_node`。
+
+| list操作                     	|                                                                                                                       	|
+|------------------------------	|-----------------------------------------------------------------------------------------------------------------------	|
+| list_add(n, p)               	| 把n指向的新节点插在p指向的节点的后面。                                                                                	|
+| list_add_tail(n, p)          	| 把n指向的新节点插在p指向的节点的前面。                                                                                	|
+| list_del(p)                  	| 删除p指向的节点。                                                                                                     	|
+| list_empty(p)                	| 查看链表是否为空。                                                                                                    	|
+| list_entry(p, t, m)          	| 我们的外部结构体是t，并且里面list_head的名字是m，返回p指向的节点的子类对象t类型的结构体的指针。                       	|
+| list_for_each(p, h)          	| h是链表的头指针，每个循环体内，p会包含遍历的节点的指针。                                                              	|
+| list_for_each_entry(p, h, m) 	| h是链表的头指针，每个循环体内，返回包含了list_head的子类对象的地址。（为什么不需要t？to_container_of应该是需要t才对） 	|
+
+内核也会使用单向链表，双向链表的优势是找到最后一个元素的时间是O(1)的，但是有的时候并不需要这个优势，而且单项链表节省非常多的内存空间。内核中的Hash结构就经常使用单向链表。
+
+单向链表对应的头是`hlist_head`，节点是`hlist_node`，操作也是前面加h，包括`hlist_add`, `hlist_del`, `hlist_empty`, `hlist_entry`, `hlist_for_each_entry`等。
+
+### The process list
+
+这个链表组织的对象是process descriptor，里面没有dummy头，第一个插入的节点是`init_task`对象，也就是0号进程（swap进程，交换进程）。
+
+使用`SET_LINKS`和`REMOVE_LINKS`宏来在process list中插入和删除对象。
+
+使用`for_each_process(p)`宏来遍历整个链表，会遍历`init_task`到最后一个节点。
+
+### The list of TASK_RUNNING processes
+
+在每次调度的时候内核需要找到优先级最高的处于就绪态的进程，在2.6之前的内核中，内核实现了一个链表存储着所有处于就绪态的进程的descriptor指针，但是并不是按优先级排布的（耗时间），同时也决定了这样的话链表的元素越多，找到一个优先级最高的元素所需要花费的时间越长，理论上是O(n)。
+
+2.6之后引入了哈希表来解决这个问题，内核准备了140个优先级，同时有140个descriptor链表，按照优先级向哈希表中的链表插入元素，这样找到就绪态中的元素的时间就变成了O(1)。
+
+其中存储着这个哈希表的结构是
+
+```c
+typedef struct prio_array_t {
+        int nr_active;          //有多少process
+        unsigned long bitmap[5];        //优先级位图，当相应优先级链表内有元素时被置位，否则被复位。
+        struct list_head queue[140];    //就绪态进程descriptor的哈希表。
+};
+```
+
+使用`enqueue_task(p, array)`和`dequeue_task(p, array)`来插入和删除元素。array是指`prio_array_t`的实例指针，p是相应descriptor的指针。
+
+# Relationships Among Processes
+
+process之间的关系包括亲子关系，sibling关系，为了描述process之间的这些关系，process descriptor中引入了下面几个属性：
+
+| 属性名      	|                                                                                                                   	|
+|-------------	|-------------------------------------------------------------------------------------------------------------------	|
+| real_parent 	| 指向创建他的进程的descriptor。如果创建他的process已经退出，那么会指向init进程的descriptor。                       	|
+| parent      	| 指向他的当前parent，大多数情况下这个值都和real_parent相同，一般trace的时候会用到，让trace进程变成他的parent进程。 	|
+| children    	| 指向一个包含了所有他的child进程的链表。                                                                           	|
+| sibling     	| 包含一个前指针和一个后指针指向sibling进程。                                                                       	|
+
+注意到Linux系统中0号进程和1号进程都是内核创建的，其他所有进程都是1号进程开始创建的。
+
+进程之间具有一些其他的非亲属之间的关系，包括process group leader, thread group leader等。
+
+| 属性名          	|                                                                                                 	|
+|-----------------	|-------------------------------------------------------------------------------------------------	|
+| group_leader    	| group_leader的descriptor的指针                                                                  	|
+| signal->pgrp    	| 进程的group leader的PID                                                                         	|
+| tgid            	| 进程的thread leader的PID                                                                        	|
+| signal->session 	| 进程的login session leader的PID                                                                 	|
+| ptrace_children 	| 进程的所有正在被ptrace监控的子进程的链表的头的指针                                              	|
+| ptrace_list     	| 当当前进程正在被trace的时候，返回被trace的sibling进程的链表中，在他前面或者在他后面的元素的指针 	|
+
+### The pidhash table and chained list
+
+使用PID来获取process descriptor不是很容易，Linux中同一个进程有多个PID，主要是以下四种：
+
+| 属性名       	|         	|                     	|
+|--------------	|---------	|---------------------	|
+| PIDTYPE_PID  	| pid     	| 最基础的PID         	|
+| PIDTYPE_TGID 	| tgid    	| thread组leader PID  	|
+| PIDTYPE_PGID 	| pgid    	| process组leader PID 	|
+| PIDTYPE_SID  	| session 	| session组leader PID 	|
+
+Linux使用哈希表来存储这些descriptor，所以总共有四个哈希表，在内核初始化的时候动态申请，存储在`pid_hash`这个数组中。每个哈希表的大小依赖于总的可用RAM大小。
+
+使用`pid_hashfn(x)`这个宏来实现将pid转换成一个哈希表index。
+
+这些哈希表中，节点的数据结构如下：
+
+```c
+struct {
+        int nr;                         //pid
+        struct hlist_node pid_chain;    //chain中前后对象的指针
+        struct list_head pid_list;      //同一个pid下前后对象的指针
+};
+```
+
+***这里有些疑问需要加强理解***
+
+下面介绍一些对pid哈希表进行操作的宏：
+
+- `do_each_task_pid(nr, type, task)`：
+- `while_each_task_pid(nr, type, task)`：对指定type下，pid都为nr的process descriptor进行遍历。
+- `find_task_by_pid_type(type, nr)`：返回指定的process descriptor，如果不匹配就返回NULL。
+- `find_task_by_pid(nr)`：相当于`find_task_by_pid_type(PIDTYPE_PID, nr)`。
+- attach_pid(task, type, nr)：把task指向的process descriptor插入到类型type， pid为nr的队列里。如果pid已经存在，就插入到per-pid队列中。***什么是per-pid队列？？***

@@ -445,7 +445,95 @@ TSSD被存储在GDT中，tr寄存器存储TSSD的基址和大小限制。
 
 内核只会在schedule中进行上下文切换，切换上下文主要是两步：
 
-- 切换Page Global Directory的地址，相当于切换了进程的虚拟内存空间。
-- 切换内核模式栈和硬件上下文。
+1. 切换Page Global Directory的地址，相当于切换了进程的虚拟内存空间。
+2. 切换内核模式栈和硬件上下文。
 
+### The switch_to macro
 
+上面得第二步是由`switch_to(prev, next, last)`这个宏完成的，这个宏里的前两个参数，一个是置换之前的进程描述符指针，一个是要置换的进程描述符的指针，last是最特别的，这里要讲到整个切换的过程。
+
+假设我们要将A进程切换到B进程，那么执行切换的时候，prev = A, next = B，之后我们进入B的执行流程。 在之后的某一刻，我们要切换回A进程，大概率现在运行的不是B进程，假设是C进程，那么执行切换的时候，prev = C，next = A，但是一旦进入到A的执行流中，现场会被还原成A中的现场，也就是prev = A, next = B，这个时候我们就丢失了对C的索引，所以last主要是用来保存C的。所以`switch_to`的调用形式一般为`switch_to(A, B, A)`, `switch_to(C, A, C)`。
+
+假设schedule的代码段如下，注意prev与next的值的变化：
+
+```c
+void schedule()
+{
+        ...
+        switch_to(A, B, A);     //prev = A, next = B    从A切换到B
+        ...
+}       //prev = C, next = B. 此时是从C返回的，如果不特殊保存C的索引C的索引就丢失了
+```
+
+### switch_to的编程实现
+
+switch_to是用内联汇编编写的，
+```asm
+"asm"{
+        ;把prev和next保存起来
+        movl prev, %eax         prev -> eax
+        movl next, %edx
+        ;保存eflags和ebp寄存器
+        pushfl
+        pushl %ebp
+        movl %esp, 484(%eax)    ;484偏移是prev->thread.esp，就是把esp保存起来
+        movl 484(%edx), %esp    ;读取next的esp
+        movl $1f, 480(%eax)     ;将label 1的地址存储在prev->thread.eip中，当prev被唤醒之后会执行label 1的程序
+        pushl 480(%edx)         ;保存next的eip
+        jmp __switch_to         ;跳转到c语言部分
+1:
+        popl %ebp               ;当A重新获取CPU的时候一开始就开始恢复ebp和eflags
+        popfl
+        movl %eax, last         ;从eax恢复正在转换的prev(C)
+}
+```
+
+***硬件上下文切换的时候eax不变？？***
+
+### __switch_to函数
+
+函数原型为
+```c
+__switch_to(struct task_struct *prev_p, struct task_struct *next_p);
+```
+
+执行`__switch_to`的时候，他的两个参数来自于%eax和%edx，而不是栈或者通用寄存器，所以需要特殊的编译器指令来实现。使用了`__attribute__`和`regparm`两个关键字，并且这两个关键字都是非标准c关键字，是gcc独有的。这里并未将他们怎么工作的，需要单独学习。
+
+这个函数的主要工作内容：
+
+```c
+___switch_to(struct task_struct *prev_p, struct task_struct *next_p);
+{
+        __unlaze_fpu();         //判断是否需要保存prev的FPU，MMX和XMM寄存器的内容，需要的话就会保存，下一小节会讲。
+        cpu = smp_processor_id();       //获取当前CPU ID，这个宏从current->thread_info.cpu中获取这个ID，并存储到本地的cpu变量中。init_tss[cpu].esp0 = next_p->thread.esp;       //把next_p->thread.esp0恢复到当前CPU的TSS的esp0中。
+        cpu_gdt_table[cpu][6] = next_p->thread.tls_array[0];  //恢复三个TLS段。
+        cpu_gdt_table[cpu][7] = next_p->thread.tls_array[1];
+        cpu_gdt_table[cpu][8] = next_p->thread.tls_array[2];
+
+        "asm" { //保存fs和gs
+                movl %fs, 40(%esi)      //fs -> prev_p->thread.fs
+                movl %gs, 44(%esi)
+                
+                movl 40(%ebx), %fs
+                movl 44(%ebx), %gs      //如果之前的fs和gs不为零（代表有有用值），那么久要恢复他们
+        }
+
+        //debug寄存器只有debugger需要，并且有人使用过了（7号值不为0）才需要恢复。
+        if (next_p->thread.debugreg[7]) {
+                loaddebug(&next_p->thread, 0);
+                loaddebug(&next_p->thread, 1);
+                loaddebug(&next_p->thread, 2);
+                loaddebug(&next_p->thread, 3);
+                /* 没有4，5 */
+                loaddebug(&next_p->thread, 6);
+                loaddebug(&next_p->thread, 7);
+        }
+
+        //更新当前CPU TSS中的io权限位图。只有当两个进程之中至少有一个有自定义位图的时候才需要。 
+        //handle_io_bitmap中，如果next_p没有自己的位图，io_bitmap的值将被设置为0x8000，如果有的话将被设置为0x9000，由于这两个值都超过了TSS的索引上嫌，所以会出发一个"General Protection"异常，异常中会判断io_bitmap的值，如果是0x8000的话就向用户空间报错，如果是0x9000的话就将io_bitmap的值设置为真正的位图偏移(104),并且强制恢复执行。
+        if (prev_p->thread.io_map_ptr || next_p->thread.io_map_ptr)
+                handle_io_bitmap(&next_p->thread, &init_tss[cpu]);
+
+        return prev_p;  //这个才是保证在整个汇编执行过程中eax一直存储着要被替换进程的描述符地址的地方，由于返回值默认存储在eax，所以prev_p就又被存储在了eax里。
+}
+```

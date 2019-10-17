@@ -90,6 +90,8 @@ process的可能状态：
 
 esp为80x86中栈顶指针。
 
+通常通过`alloc_thread_info()`来申请这段内存。
+
 - `thread_info`结构体（从0地址开始存储）
 - 内核模式下的堆栈（从最大地址向下增长）
 
@@ -537,3 +539,175 @@ ___switch_to(struct task_struct *prev_p, struct task_struct *next_p);
         return prev_p;  //这个才是保证在整个汇编执行过程中eax一直存储着要被替换进程的描述符地址的地方，由于返回值默认存储在eax，所以prev_p就又被存储在了eax里。
 }
 ```
+
+## Saving and Loding the FPU, MMX, and XMM Registers
+
+80x86架构相关，暂略。
+
+# Creating Processes
+
+传统的UNIX系统在创建子进程的时候会拷贝整个地址空间，这样的话很慢，现代系统通过几个机制来避免这些问题：
+
+- Copy On Write：子进程和parent进程都使用同一段内存，其中一个需要写这段共享的数据的时候就把这段数据拷贝一段新的然后写。
+- Lightweight Processes：一组的LWP之间数据共享，所以不需要拷贝变量。
+- vfork()：船舰一个和parent进程共享地址空间的子进程，子进程执行间parent进程会阻塞直到子进程退出
+
+## The clone(), fork(), and vfork() System Calls
+
+LWP时使用clone()函数拷贝的，clone()具有下面这些参数：
+
+- fn：指定要执行的函数，当函数返回的时候子进程结束，并且返回的整形数作为返回值。
+- arg：传递给fn的参数指针。
+- flags：下面列表。
+- child_stack：指定用户模式下子进程的栈指针，每次创建都应该申请一块新的栈空间给子进程。
+- tls：指定子进程的TLS段的数据结构，只有在CLONE_SETTLS被设置了才有意义。
+- ptid：指定一个parent进程用户空间的变量地址，将存储子进程的PID，只有CLONE_PARENT_SETTID被设置才有意义。
+- ctid：相比ptid，指定的是紫禁城的用户空间的变量地址，只有CLONE_CHILD_SETTID被设置才有意义。
+
+clone()可选的flags：
+
+- CLONE_VM：共享内存描述符和所有的页。
+- CLONE_FS：共享根目录，当前工作目录和新文件默认权限。
+- CLONE_FILES：共享打开的文件表。
+- CLONE_SIGHAND：共享信号处理函数表和正在阻塞和pending的信号表，如果要设置这个位那么CLONE_VM需也要被设置。
+- CLONE_PTRACE：如果parent进程正在被trace，那么子进程也会被trace，通常debugger会强制这个位为1。
+- CLONE_VFORK：如果正在执行vfork()就会被置位。
+- CLONE_PARENT：将子进程的parent设置为调用的进程。
+- CLONE_THREAD：将子进程插入到parent进程所在的tgid哈希队列中，设置相应的tgid和group_leader，如果要设置这个位，必须要先设置CLONE_SIGHAND。
+- CLONE_NEWNS：子进程具有自己的目录配置，和CLONE_FS是互斥的。
+- CLONE_SYSVSEM：共享System V undoable semaphore operations（第19章详细讲）。
+- CLONE_SETTLS：申请一个新的TLS段给子进程。
+- CLONE_PARENT_SETTID：将子进程的PID信息写到parent进程的指定变量中。
+- CLONE_CHILD_CLEARTID：置位的时候内核会检测当子进程退出或者开始执行新程序的时候，清楚ctid指向的变量并且唤醒任何等待这个事件的进程。
+- CLONE_DETACHED：deprecated。
+- CLONE_UNTRACED：用于清除CLONE_PTRACE。
+- CLONE_CHILD_SETTID：将子进程的PID写到指定的子进程的一个变量中。
+- CLONE_STOPPED：强制子进程一创建就是TASK_STOPPED状态。
+
+clone是c库自带的一个函数，调用这个函数会调用到系统调用clone，之后会将任务转向系统服务`sys_clone()`执行。但是`sys_clone()`不具有fn和arg两个参数，而是`clone()`自己将fn和arg两个参数放到自己的返回地址上，这样`clone()`执行完之后不是退回原来的地方，而是“返回”到fn函数进行执行，参数为arg。
+
+fork()系统调用相当于设置SIGCHLD信号（***对应哪个flag***）并且其他的flags都为空，并且`child_stack`就是当前parent的stack，所以parent进程和子进程共享用户模式栈，但他们其实是基于Copy On Write，有人要对栈进行修改的时候他们两个的栈就不是一个了。
+
+vfork()系统调用相当于设置SIGCHLD还有CLONE_VM和CLONE_VFORK，并且子进程栈指针和母进程栈指针相同。
+
+### The do_fork() function
+
+clone(), fork()和vfork()实际上都是由do_fork()来处理的，do_fork()有下面这些参数：
+
+- clone_flags：clone里的flags
+- stack_start：clone里的child_stack
+- regs：指向当从用户模式切换到内核模式时，保存到内核模式栈的通用寄存器的值。
+- stack_size：不使用，给0
+- parent_tidptr：clone里的ptid
+- child_tidptr：clone里的pcid
+
+do_fork()使用一个辅助函数copy_process()来配置好进程描述符和子进程需要的其他的内核数据结构，这里先讲do_fork()都做了些什么：
+
+1. 查询`pidmap_array`申请一个新的未使用的PID。
+2. 检查母进程的ptrace属性(current->ptrace)，看母进程是否正在被debugger追踪并且希望追踪子进程(***CLONE_PTRACE??***)，如果子进程需要被追踪就设置好CLONE_PTRACE。
+3. 调用`copy_process()`对进程数据结构进行拷贝，如果成功的话会返回新的进程描述符指针。
+4. 如果CLONE_STOPPED被置位或者子进程需要被追踪(p->ptrace中PT_PTRACED位被置位)，那么就将子进程设置为TASK_STOPPED状态并给子进程发送一个SIGSTOP信号。
+5. 如果CLONE_STOPPED没有被设置，那么将调用`wake_up_new_task()`，这个函数进行如下操作：
+    1. 调整母进程和子进程的调度参数（详见第七章）。
+    2. 如果子进程会和母进程运行在同一个CPU上，并且他们的CLONE_VM位没有设置，也就是不共享地址空间，那么内核会将子进程插入到就绪队列中母进程的前面，让子进程先于母进程执行。如果不这么做而导致母进程先执行的话，由于Copy On Write，母进程可能会创建很多不必要的页（***这里不是很明白***）。
+    3. 与2相反，如果子进程不和母进程运行在同一个CPU上或者他们的CLONE_VM被置位，那么子进程将被插入到就绪队列里母进程后面。
+6. 如果CLONE_STOPPED被设置，设置子进程为TASK_STOPPED状态。
+7. 如果母进程正在被追踪，他会将子进程的PID存储在current->ptrace_message中并调用ptrace_notuify()来通知母进程的母进程，向其发送一个SIGHLD信号，也就是正在追踪他的进程他创建了个子进程。
+8. 如果CLONE_VFORK被设置，母进程会被插入到一个等待队列中，等待子进程释放自己的地址空间。
+9. 返回子进程的PID，函数终止。
+
+### The copy_process() function
+
+copy_process()的参数是do_fork()基础上再加上一个子进程的PID，他的主要步骤如下：
+
+1. 检查clone_flags是否兼容，下面几种情况会导致出错：
+    1. CLONE_NEWS和CLONE_FS同时被设置。
+    2. CLONE_THREAD被设置，但是CLONE_SIGHAND没有被置位。
+    3. CLONG_SIGHAND被置位，但是CLONE_VM没有被置位。
+2. 调用security_task_create()和security_task_alloc()。Linux提供钩子函数允许这些函数被扩展。
+3. 调用`dup_task_struct()`获取子进程的进程描述符，他的步骤主要包括：
+    1. 调用__unlazy_fpu()保存当前进程的FPU，MMX，SSE/SSE2寄存器内容到current->thread_info中，之后子进程会将这个thread_info的值拷贝到子进程的进程描述符中。
+    2. 调用`alloc_task_struct()`来申请一个新的进程描述符，并将其指针保存到tsk这个局部变量中。
+    3. 调用`alloc_thread_info()`来申请一个新的thread_info，包括内核模式栈，并将其地址存储到ti这个局部变量中。
+    4. 将当前进程的进程描述符的内容拷贝带子进程的进程描述符中，并将子进程的thread_info设置为ti。
+    5. 拷贝当前进程thread_info的内容到子进程的thread_info中，并将thread_info->task的值设置为tsk。
+    6. 将进程描述符中的使用计数`tsk->usage`设置为2，表示当前进程描述符正在被使用并且进程正在工作。（***这个计数器是干嘛的***）
+    7. 返回新的进程描述符指针tsk。
+4. 检查current->signal->rlim[RLIMIT_NPROC].rlim_cur是否小于等于当前用户已经拥有的进程数，如果是的话将会返回一个错误，除非用户有超级用户权限。进程描述符中有一个user属性，指向类型为`user_struct`的指针，包含每个用户的信息，其中有进程数（tsk->user->processes）。
+5. 将4中讲的进程数加一并且增加一个user的使用计数（tsk->user->__count）。
+6. 检查当前系统中的进程数没有大于系统允许的进程数（max_threads）。
+7. 如果内核函数实现了某个内核模块新进程的执行域与可执行格式，要增加使用计数。（二十章会讲）
+8. 设置几个和进程状态有关的关键变量：
+    1. 初始化内核锁计数。`tsk->lock_depth = -1;`（第五章）
+    2. 初始化执行计数。`tsk->did_exec = 0`这个东西反应这个进程执行的所有`execve()`的数目。
+    3. 更新一些进程标志，包括清除PF_SUPERPRIV，表示进程还没用到任何超级用户权限，置位PF_FORKNOEXEC，表示进程还没有执行过。
+9. 保存新进程的PID到`tsk->pid`。
+10. 如果CLONE_PARENT_SETTID被置位，拷贝子进程PID到`parent_tidptr`变量中。
+11. 初始化子进程中所有的`list_head`类型和`spin_lock`类型的结构体，并设置有关未处理信号，定时器和定时器统计信息的一些属性。
+12. 调用`copy_semundo()`，`copy_files()`，`copy_fs()`，`copy_sighand()`，`copy_signal()`，`copy_mm()`，和`copy_namespace()`，根据clone指定的flag讲母进程中的一些信息拷贝到子进程中。
+13. 调用`copy_thread()`来初始化子进程内核模式栈，它们的值为母进程调用到`clone()`系统调用时候的值，先前保存过。同时将eax的值设置为0（返回值）。thread.esp被初始化为子进程的内核模式栈的基地址，并且一个汇编函数`ret_from_fork()`的地址被存储在thread.eip中。如果母进程使用IO访问位图，那就也给子进程复制一份。最后如果CLONE_SETTLS位被置位，子进程的TLS段就被设置为tls指定的数据结构的值。
+14. 如果CLONE_CHILD_SETTID或者CLONE_CHILD_CLEARTID被置位，内核将会拷贝tsk->set_chid_tid和tsk->clear_child_tid的child_tidptr的值到子进程对应属性中。这些标志表示用户模式下child_tidptr指向的变量需要被改变，通常是在后面改变的。
+15. 关闭子进程中thread_info中的TIF_SYSCALL_TRACE标志，这样的话ret_from_fork()将不会通知调试进程有关系统调用终止的信息。但并不代表对系统调用的追踪终止了，对系统调用的追踪还是有tsk->ptrace中的PTRACE_SYSCALL控制的。
+16. 将tsk->exit_signal属性设置为clone_flags中表示信号的低几位，除非CLONE_THREAD被置位，这种情况下直接被设置为-1.应为只有一个线程组的最后一个线程退出的时候才会通知线程组长的母进程。
+17. 调用sched_fork()来完成调度器中新进程数据结构的初始化，同时设置新进程的状态到TASK_RUNNING，preempt_count到1，同时关闭内核的抢占。而且，为了让调度器更公平，这个函数将母进程剩下的时间片时间在子进程和母进程中共享。
+18. 将thread_info->cpu设置为smp_processor_id()。
+19. 初始化指定母子关系的属性，要注意的是当CLONE_PARENT和CLONE_THREAD被设置的时候，他会初始化tsk->real_parent和tsk->parent为current->real_parent，也就是将子进程的母进程设置为当前进程的母进程，否则就会将子进程的母进程设置为当前进程。
+20. 如果子进程不需要被追踪，会设置tsk->ptrace为0。
+21. 执行SET_LINKS宏将新进程的描述符插入到进程链表中。
+22. 如果子进程设置为需要被追踪（tsk->ptrace中的PT_PTRACED被置位），那么会将tsk->parent设置为current->parent并将进程加入到调试队列中。
+23. 调用attach_pid()将新进程的PID插入到PID哈希表中。
+24. 如果子进程是线程组组长（CLONE_THREAD复位），那么：
+    1. 将tsk->tgid初始化为tsk->pid。
+    2. 将tsk->group_leader初始化为tsk。
+    3. 调用三次attach_pid()将子进程添加到PIDTYPE_TGID，PIDTYPE_PGID和PIDTYPE_SID的哈希表中。
+25. 否则，如果不是线程组组长，那么：
+    1. 将tsk->tgid初始化为current->tgid。
+    2. 将tsk->group_leader初始化为current->group_leader。
+    3. 调用attach_pid()将子进程添加到PIDTYPE_TGID哈希表中。
+26. nr_threads增加1。
+27. total_forks增加1.
+28. 返回tsk，函数结束。
+
+所以可以通过fork()的返回值来判断是子进程还是母进程主要是对eax寄存器修改的结果。
+
+## Kernel Threads
+
+传统的UNIX系统使用间歇运行的守护进程执行一些重要任务，包括写缓存，换出不用的页等，这样响应很不好。由于他们基本都运行于内核空间，Linux将这些任务交付给内核线程进行执行，内核线程的特点包括：
+
+- 内核线程只运行于内核模式，但是常规线程可能运行于内核模式或者用户模式。
+- 由于内核线程只运行于内核模式，所以他们只使用虚拟地址空间的大于PAGE_OFFSET的部分，普通线程会用到整个4GB的地址空间。
+
+### 创建一个内核线程
+
+使用kernel_thread()来创建一个内核线程，包括三个参数，要执行的函数指针，参数指针还有clone标志位集合。
+
+kernel_thread()内部会调用到do_fork()，使用下面的参数：
+
+```c
+do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, pregs, 0, NULL, NULL);
+```
+
+如果没有CLONE_VM，复制的用户空间地址空间根本不会被使用，会浪费资源。CLONE_UNTRACED表明了内核线程不可被TRACE。
+
+copy_thread()会找到CPU初始化CPU寄存器的初始化值，然后把这些值所在数据结构的地址给pregs。（***这段有问题***）
+
+主要目的是：
+
+- ebx和edx会被设置为fn和arg。
+- eip寄存器会被设置为下面这个代码段的地址：
+
+```asm
+movl %edx, %eax
+pushl %edx
+call *%ebx
+pushl %eax
+call do_exit
+```
+
+这样内核线程就开始执行fn(arg)了函数了，如果这个函数终止，内核线程会调用_exit()系统调用返回fn()的返回值。
+
+### Process 0
+
+0号进程是Linux系统中所有进程的祖先，叫做空闲（idle）进程，由于历史原因，也叫做交换（swapper）进程，是在Linux初始化阶段创建的进程。这个进程所有的数据结构都是静态声明的，有下面这些：
+
+
